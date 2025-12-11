@@ -1,0 +1,277 @@
+---
+title: "Final_Project_Discussion"
+author: "Doh-Nani"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+PHS<-read.csv("C:/Users/RALPH/Downloads/Data/COVID_19.csv")
+clean_numeric <- function(x) {
+  # Remove commas, dollar signs, spaces, and other non-numeric characters
+  x <- gsub(",", "", x)           # Remove commas
+  x <- gsub("\\$", "", x)         # Remove dollar signs
+  x <- gsub("%", "", x)           # Remove percent signs
+  x <- gsub(" ", "", x)           # Remove spaces
+  x <- gsub("N/A|NA|na", NA, x)   # Replace text NA with actual NA
+  x <- gsub("-", NA, x)           # Replace dashes with NA
+  
+  # Convert to numeric
+  as.numeric(x)
+}
+
+# Apply cleaning function
+PHS_clean <- PHS
+PHS_clean$mortality_rate_per_100k <- clean_numeric(PHS$mortality_rate_per_100k)
+PHS_clean$case_rate_per_100k <- clean_numeric(PHS$case_rate_per_100k)
+PHS_clean$test_rate_per_100k <- clean_numeric(PHS$test_rate_per_100k)
+
+# Verify conversion
+cat("\nAfter cleaning:\n")
+cat("Class of mortality_rate_per_100k:", 
+    class(PHS_clean$mortality_rate_per_100k), "\n")
+#removing rows with missing values from core variables
+PHS_final <- PHS_clean[complete.cases(PHS[, c("mortality_rate_per_100k", 
+                                         "case_rate_per_100k", 
+                                         "test_rate_per_100k", 
+                                         "adequate_testing")]), ]
+cat("\n=== Observations ===\n")
+cat("Original rows:", nrow(PHS), "\n")
+cat("Clean rows:", nrow(PHS_final), "\n")
+```
+
+**VARIABLE SELECTION:**
+
+We would want to split the zip code into numeric values such as Longitude and Latitude and rerun the the entire model. We may want to find the best model by adding an interaction term and use the step-wise selection criterion to select our best model.
+
+We select the model with the least AIC and to do that we run a step-wise selection in both directions as demonstrated below.
+
+```{r}
+#Performing a linear model on the ultered data including interaction terms
+mlrm_new <- lm(mortality_rate_per_100k ~ 
+             case_rate_per_100k + 
+             test_rate_per_100k + 
+             adequate_testing+
+             Longitude +
+             Latitude+
+            case_rate_per_100k : test_rate_per_100k +
+            case_rate_per_100k : adequate_testing+
+            case_rate_per_100k : Longitude+
+            case_rate_per_100k : Latitude+
+            test_rate_per_100k : adequate_testing+
+            test_rate_per_100k : Longitude +
+            test_rate_per_100k : Latitude+
+            adequate_testing : Longitude +
+            adequate_testing : Latitude +
+            Longitude : Latitude,
+           data = PHS_final)
+summary(mlrm_new)
+
+#performing stepwise selection of variables
+mod_best<-step(mlrm_new,direction = "both",trace = 0)
+summary(mod_best)
+#Testing Homoscedasticity and Normality for the Amended data
+plot(mod_best,1)
+plot(mod_best,2)
+library(lmtest)
+bptest(mod_best)
+ks.test(rstandard(mod_best),"pnorm")
+```
+
+from the results The $r^2$ wasn't improved enough despite adding the interaction term and again Homoscedasticity and normality are violated. The residual plot appears to be horn shaped and the QQ plot also shows more points at the top right coner derailing upwards the 45 degree line suggesting a right skew of the plot. Next we will want to perform a log transformation to correct that, hopefully it corrects.
+
+The selection included all variable as relevant to mortality rate per 100k except the interaction term,\
+case_rate_per_100k : Latitude.
+
+**LOG TRANSFORMATION**:
+
+performing log transformation on the newly selected model from above. The aim is to manipulate the data to satisfy the homoscedasticity and normality test.
+
+```{r}
+#log transformation of our selected model including the interaction term. 
+mod_lntrns<- lm(log(mortality_rate_per_100k+1) ~ 
+             case_rate_per_100k + 
+             test_rate_per_100k + 
+             adequate_testing+
+             Longitude +
+             Latitude+
+            case_rate_per_100k : test_rate_per_100k +
+            case_rate_per_100k : adequate_testing+
+            case_rate_per_100k : Longitude+
+            test_rate_per_100k : adequate_testing+
+            test_rate_per_100k : Longitude +
+            test_rate_per_100k : Latitude+
+            adequate_testing : Longitude +
+            adequate_testing : Latitude +
+            Longitude : Latitude,
+           data = PHS_final)
+summary(mod_lntrns)
+
+#performing stepwise selection of variables
+#final_mod<-step(mod_lntrns,direction = "both",trace = 0)
+#summary(final_mod)
+#Testing Homoscedasticity and Normality for the Amended data
+plot(mod_lntrns,1)
+plot(mod_lntrns,2)
+library(lmtest)
+bptest(mod_lntrns)
+ks.test(rstandard(mod_lntrns),"pnorm")
+```
+
+**INTERPRETATION**
+
+Generally, The mortality rate per 100k is explained by the selected variables and it is statistically significant with an F-Value 175.9 and p-value \< 2.2e-16, than no model.
+
+## DISCUSSION AND SUMMARY OF MODEL
+
+## **Key Findings**
+
+### **1. Main Effects**
+
+The following are the change in the estimated log of mortality rate per 100k if there is a 1 more individual examined/suspected for Covid -19 of the following variables
+
+-   **Case Rate** ($\beta$ = -0.148, p = 0.010): Higher case rates are associated with *lower* log mortality rates, which seems counterintuitive but is likely modified by the existence of the interaction terms.
+
+-   **Test Rate** ($\beta$= -0.019, p \< 0.001): More testing is associated with lower mortality, suggesting better detection and management.
+
+-   **Adequate Testing** ($\beta$= -48.08, p = 0.051): Marginally significant; adequate testing shows a protective effect.
+
+-   **Geographic Location**: Both longitude ($\beta$ = 353.8) and latitude ($\beta$ = -741.8) are highly significant (p \< 0.001), indicating strong spatial patterns in mortality. This indicates that the city's geographical location plays a major role in mortality patterns.
+
+### **2. Critical Interactions**
+
+-   **Case Rate × Test Rate** ($\beta$ = -5.04×10⁻⁸, p \< 0.001): The relationship between cases and mortality depends on testing levels. Higher testing may mitigate mortality effects of high case rates.
+
+-   **Test Rate × Adequate Testing** ($\beta$= -4.38×10⁻⁵, p \< 0.001): The benefit of testing is enhanced when testing is adequate.
+
+-   **Geographic Interactions**: Testing effectiveness varies significantly by location (test rate × longitude/latitude both highly significant), suggesting regional differences in healthcare infrastructure or population characteristics.
+
+-   **Longitude × Latitude** ($\beta$ = -8.46, p \< 0.001): Strong spatial interaction suggesting mortality patterns aren't uniform across the geographic plane.
+
+## **Model Performance**
+
+Despite all the transformation adjustment, addition of variables and the like, the model is still not improved as far as the explanation of the variation in the response variable is concerned as indicated below.
+
+-   $\boldsymbol{\text{R}^2}$ **= 0.168**: The model explains about $17\%$ of variance in log mortality rates—modest but reasonable for geographic health data with many unmeasured confounders.
+
+-   **Highly significant F-statistic** (p \< 0.001): Overall, the model is statistically meaningful against nothing.
+
+### **1. Heteroscedasticity (Breusch-Pagan test)**
+
+-   **BP = 897, p \< 0.001**: Strong evidence of non-constant variance in residuals.
+
+-   **Impact**: Standard errors may be biased, affecting the reliability of p-values and confidence intervals.
+
+### **2. Non-Normality (Kolmogorov-Smirnov test)**
+
+-   **D = 0.272, p \< 0.001**: Residuals deviate significantly from normality.
+
+-   **Impact**: With large sample size (n=12,177), this is less concerning for coefficient estimates but may affect prediction intervals.
+
+-   The log transformation helped a little, but residuals still show skewness (min = -2.71, max = 4.07).
+
+## Discussion and Inference
+
+This an inferential Statistics Model, incorporated was **log-transformed of mortality rate** (per 100k) as a function of COVID-19 case rates, testing rates, testing adequacy, and geographic location (longitude/latitude), including multiple interaction terms.
+
+The whole Idea is to Identify some challenges and most importantly deaths occurred during the Covid 19 era, understanding the Geographical location that was highly susceptible or prone to the pandemic and how to put some measures in place to avoid or mitigate such incidence in the near future, should similar incident or more severe should occur. We want to understand the severity of the pandemic and to assess the the interventions that was put in place if they were helpful and how well to improve them for future cases like this.
+
+More than 12,000 cases were recorded during this era and there were proper interventions putting in place especially the south side of Chicago. Even with high cases, mortality could be controlled because testing was adequate and accessible, they made a measurable difference since testing sites were accessible which was crucial.
+
+It was noticed that early detection of signs and symptoms and with the aid of testing helped to mitigate the spread and Increased test rate , when adequate, demonstrate reduced mortality in the city especially the south side.
+
+Generally, The selected variable were unable to explain the variation in the mortality rate per 100k suggesting that there are other variables that could have been an influencing factor to mortality in the city during the era, i.e Socioeconomic status, racial disparities, House density, essential worker concentration, chronic burden, healthcare access. These are typically variables which were not at the data site for confidentiality reasons. causing the biasness in the model. we may be un able to make proper inference due to the bias of the residual.
+
+Defining the Confident intervals for the coefficients estimates $\beta$'s at a 95% confident intervals.
+
+```{r}
+#Determinig the possible interval for the coefficient Estimates
+confint(mod_lntrns,"case_rate_per_100k")
+confint(mod_lntrns,"test_rate_per_100k")
+confint(mod_lntrns,"adequate_testing")
+confint(mod_lntrns,"Longitude")
+confint(mod_lntrns,"Latitude")
+```
+
+**INTERPRETATION**
+
+**C_R_p_100k** is (-0.2602738, -0.03543688); we are 95% confident that a 1 more case increase for Covid 19, the log expected value for mortality rate per 100k will change fallen in between (-0.2602738, -0.03543688) deaths, Holding all variables constant.
+
+For adequate_testing,(-96.44676, 0.2791629); we are 95% confident that a 1 more adequate test_yes, decreases the expected mortality rate per 100k deaths than adequate test_no by a coefficient estimate, falling in between exp(-96.44676)=$1.3\times 10^{-42}$ and exp(0.2791629)=1.3, Holding all other variable constant.
+
+## **Recommendations**
+
+1.  **Testing Matters**: Both the rate and adequacy of testing significantly reduce mortality, especially in combination. There fore I recommend in any circumstance like this advertisement and thorough education should be sent to prone areas in order for them to get an early test. there must be an accessible location, operational and fast turnaround on results.
+
+2.  **Geographic Disparities**: Location strongly predicts mortality, even after controlling for testing and case rates. This suggests underlying regional factors (healthcare quality, demographics, policy responses). In Addition, there must be improvement in health accessibility in areas where there are limited health facility and healthworkers.
+
+3.  **Complex Relationships**: The numerous significant interactions indicate that no single factor operates in isolation—the effect of case rates on mortality depends heavily on testing infrastructure and location.
+
+4.  **Model Limitations**: The modest R² and diagnostic violations suggest important unmeasured variables (e.g., age distribution, comorbidities, healthcare capacity, vaccination rates, variant types). More information is required to properly investigate the full or almost full reasons for Covid -19 deaths.
+
+Weighted Least Squares
+
+Final thing for consideration as far as Homoscedasticity and normality is concerned will be Weighted least squares on the selected model above
+
+```{r}
+wts<-1/fitted(mod_best)^2 #beacause horn is increasing
+#fitted because (mod_best)provides the fitted values
+mod_wls<-lm(mortality_rate_per_100k ~ 
+             case_rate_per_100k + 
+             test_rate_per_100k + 
+             adequate_testing+
+             Longitude +
+             Latitude+
+            case_rate_per_100k : test_rate_per_100k +
+            case_rate_per_100k : adequate_testing+
+            case_rate_per_100k : Longitude+
+            test_rate_per_100k : adequate_testing+
+            test_rate_per_100k : Longitude +
+            test_rate_per_100k : Latitude+
+            adequate_testing : Longitude +
+            adequate_testing : Latitude +
+            Longitude : Latitude,
+           data = PHS_final,weights = wts)
+#Testing Homoscedasticity and Normality for the Amended data
+plot(mod_wls,1)
+plot(mod_wls,2)
+library(lmtest)
+bptest(mod_wls)
+ks.test(rstandard(mod_wls),"pnorm")
+```
+
+The Normality and Homoscedasticity test are violated with weighted least squares as well,
+
+**CONCLUSION:**
+
+Despite all the effort to attain Homoscedasticity and normality via the introduction of interaction term due to confounding in some of the predictor variables, variable selection for best model, log transformation and weighted least squares. All these attempts remains futile. So the model remains undesirable in other words not best for inferential statistics. Henceforth, we won't be able to say that the expected log estimate for case rate per 100k for Covid-19 at Illinois state will lie between (-0.2602738, -0.03543688).
+
+**LASSO REGRESSION**
+
+Finally we will attempt to understand or predict the mortality rate per 100k individual from the Chicago enclave using Lasso Regression this approach doesn't require normality and Homoscedasticity.
+
+```{r}
+library(glmnet)
+x<-model.matrix(mortality_rate_per_100k~.,data=PHS_final)
+y<-PHS_final$mortality_rate_per_100k
+#LASSO
+lam_lasso<-cv.glmnet(x=x, y=y, nfolds = 200, alpha=1)
+#alpha =1 means we are doing LASSO
+plot(lam_lasso)
+#plots the estimates of the lambda parameter plus a 955 CONFIDENCE INTERVAL
+lam_lasso
+#so min is the value of lambda that minimiizes the MSPE and 1se adds a standard error  to it
+lambda_lasso<-lam_lasso$lambda.min
+#Let's see which one produces the smallest MSPE
+lam_lasso$cvm[lam_lasso$lambda==lambda_lasso]
+#we are extracting the MSPE for the obtimal lambda
+```
+
+This prediction is not an objective of my research but in the scenario we want to just predict the mortality per rate 100k without looking into any assumption.
+
+Checking for multicolineariity in the variables
+
+```{r}
+
+```

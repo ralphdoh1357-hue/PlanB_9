@@ -1,0 +1,466 @@
+---
+title: "Final Project Model"
+author: "Doh-Nani"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+1.  **MODEL OVERVIEW**
+
+    1.1 General Model Form
+
+    The general multiple linear regression model for COVID-19 mortality
+    rates is:
+
+    Y = β₀ + β₁X₁ + β₂X₂ + β₃X₃ + β₄X₄ + ... + βₖXₖ + ε Where:
+
+    • Y = COVID-19 mortality rate per 100,000 population (dependent
+    variable)
+
+    • β₀ = Intercept (baseline mortality rate when all predictors = 0)
+
+    • β₁, β₂, ..., βₖ = Regression coefficients (effect of each
+    predictor on mortality)
+
+    • X₁, X₂, ..., Xₖ = Independent variables (predictors)
+
+    • ε = Error term (residuals)
+
+    1.2 Unit of Analysis Geographic Unit: ZIP Code Tabulation Area
+    (ZCTA) in Chicago
+
+    • Temporal Unit: Week (specimen collection date)
+
+    • Observation Structure: Panel data (ZIP code × week)
+
+    • Total Observations: N = (Number of ZIP codes) × (Number of weeks)
+
+    **DEPENDENT VARIABLE SPECIFICATION**
+
+    2.1 Primary Outcome Variable
+
+    Variable Name: mortality_rate_per_100k
+
+    Definition: mortality_rate_per_100k = (Weekly Deaths in ZIP code /
+    ZIP code Population) × 100,000
+
+    Data Source:
+
+    • Numerator: Chicago Department of Public Health COVID-19 deaths (by
+    week of death)
+
+    • Denominator: American Community Survey (2018) population estimates
+    Characteristics: • Type: Continuous
+
+    • Range: 0 to maximum observed rate
+
+    •Units: Deaths per 100,000 residents per week
+
+    • Distribution: Expected to be right-skewed (most ZIP-weeks have low
+    rates, few have very high rates)
+
+2.2 Handling Privacy Suppression Issue:
+
+ZIP codes with \<5 cumulative cases have blank values for deaths •
+Exclusion Approach: Remove ZIP code-week observations with suppressed
+data
+
+2.3 Variable Selection & Transformations
+
+Log Transformation: (log_mortality_rate = ln(mortality_rate_per_100k +
+1))
+
+• Add 1 to handle zero values
+
+• Interpretation: β coefficient represents % change in mortality per
+unit change in predictor
+
+**Decision Rule:**
+
+• Compare model fit (R², AIC, BIC) across transformations
+
+**INDEPENDENT VARIABLES SPECIFICATION**
+
+3.1 Core Predictor Variables
+
+**Variable 1:** Case Incidence Rate
+
+Variable Name: case_rate_per_100k
+
+Definition:
+
+case_rate_per_100k = (Weekly Cases in ZIP code / ZIP code Population) ×
+100,000
+
+Data Source: Chicago Department of Public Health (cases by specimen
+collection week)
+
+Rationale: Higher case burden may indicate greater community
+transmission, potentially leading to more deaths. However, relationship
+may be non-linear due to healthcare capacity constraints. Expected
+Relationship: Positive (β₁ \> 0) - higher cases → higher mortality
+Potential Issues:
+
+• Under ascertainment varies over time and by ZIP code
+
+• Confounded by testing availability
+
+• May be highly correlated with deaths (multicollinearity concern)
+Alternative Specifications:
+
+• Lagged case rate (e.g., 2-week lag to account for time from infection
+to death)
+
+• Cumulative case rate (total cases per 100k through current week)
+
+• Case growth rate (% change from previous week)
+
+**Variable 2:** Testing Volume Variable
+
+Name: test_rate_per_100k
+
+Definition: test_rate_per_100k = (Weekly Tests in ZIP code / ZIP code
+Population) × 100,000
+
+Data Source: Chicago Department of Public Health (tests by specimen
+collection week)
+
+Rationale: Higher testing may indicate better surveillance and earlier
+case detection, potentially reducing mortality. Alternatively, high
+testing may reflect outbreak response in high-burden areas. Expected
+Relationship: Negative (β₂ \< 0) - higher testing → lower mortality (but
+may be positive if testing reflects outbreak response)
+
+**Potential Issues:**
+
+• Multiple tests per person inflates counts (especially post-10/29/2020)
+
+• Electronic lab reporting completeness varies over time
+
+• Testing policies changed throughout pandemic
+
+• Employment-based serial testing may distort ZIP-level testing rates
+
+Alternative Specifications:
+
+• Tests per case (test positivity rate inverse):
+
+• tests_per_case = Weekly Tests / Weekly Cases
+
+Percent tested positive:
+
+• pct_positive = (Weekly Cases / Weekly Tests) × 100 o Lower % positive
+may indicate better testing coverage o Expected relationship: Positive
+(higher positivity → higher mortality)
+
+Testing adequacy indicator:
+
+• adequate_testing = 1 if tests_per_case ≥ 10, else 0 o WHO
+recommendation: \>10 tests per case indicates adequate surveillance
+
+**Variable 3:**
+
+Geographic Location Approach A: ZIP Code Fixed Effects (Categorical)
+
+Variable Names: ZIP_60601, ZIP_60602, ..., ZIP_60659 (dummy variables
+for each ZIP code)
+
+Definition: Binary indicators for each ZIP code ZIP_60601 = 1 if
+observation from ZIP 60601, else 0, This is done in R automatically.
+
+Rationale: Captures all time-invariant ZIP code characteristics
+(demographics, infrastructure, healthcare access, socioeconomic status).
+
+Implementation:
+
+• Include (k-1) ZIP code dummies (omit reference ZIP code)
+
+• Reference category: Choose a middle-income, racially diverse ZIP code
+
+Advantages:
+
+• Controls for all observed and unobserved ZIP-level confounders
+
+• No need to collect additional sociodemographic data
+
+• Flexible (no assumptions about functional form)
+
+Disadvantages:
+
+• Large number of parameters (reduces degrees of freedom)
+
+• Cannot estimate effects of time-invariant ZIP characteristics
+
+• Interpretation focuses on within-ZIP variation over time
+
+**Reason:** It is of interest to me to identify the mortality rate at
+the Chicago enclave and to assess the extent of threat as Covid-19 was
+to the City during the outbreak. Assessment is Dependent on the listed
+core independent variables
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+PHS<-read.csv("C:/Users/RALPH/Downloads/Data/COVID_19.csv")
+clean_numeric <- function(x) {
+  # Remove commas, dollar signs, spaces, and other non-numeric characters
+  x <- gsub(",", "", x)           # Remove commas
+  x <- gsub("\\$", "", x)         # Remove dollar signs
+  x <- gsub("%", "", x)           # Remove percent signs
+  x <- gsub(" ", "", x)           # Remove spaces
+  x <- gsub("N/A|NA|na", NA, x)   # Replace text NA with actual NA
+  x <- gsub("-", NA, x)           # Replace dashes with NA
+  
+  # Convert to numeric
+  as.numeric(x)
+}
+
+# Apply cleaning function
+PHS_clean <- PHS
+PHS_clean$mortality_rate_per_100k <- clean_numeric(PHS$mortality_rate_per_100k)
+PHS_clean$case_rate_per_100k <- clean_numeric(PHS$case_rate_per_100k)
+PHS_clean$test_rate_per_100k <- clean_numeric(PHS$test_rate_per_100k)
+
+# Verify conversion
+cat("\nAfter cleaning:\n")
+cat("Class of mortality_rate_per_100k:", 
+    class(PHS_clean$mortality_rate_per_100k), "\n")
+#Checking for missing values
+colSums(is.na(PHS_clean))
+#removing rows with missing values from core variables
+PHS_final <- PHS_clean[complete.cases(PHS[, c("mortality_rate_per_100k", 
+                                         "case_rate_per_100k", 
+                                         "test_rate_per_100k", 
+                                         "adequate_testing")]), ]
+cat("\n=== Observations ===\n")
+cat("Original rows:", nrow(PHS), "\n")
+cat("Clean rows:", nrow(PHS_final), "\n")
+
+```
+
+```{r}
+#project
+mlrm <- lm(mortality_rate_per_100k ~ 
+             case_rate_per_100k + 
+             test_rate_per_100k + 
+             adequate_testing+
+             as.factor(ZIP.Code.Location),
+           data = PHS_final)
+summary(mlrm)
+```
+
+**Interpretation of Outcome:**
+
+-   $3.885e^{-1}$: A 1 more increase in the case rate per 100k of
+    covid-19 at the Chicago enclave increases the mortality rate per
+    100k by 0.3885, Holding all other variable constant.
+
+-   $2.209e-^{3}$ :A 1 more increase in the test rate per 100k of
+    covid-19 at Chicago increases the mortality rate per 100k by
+    0.00221, Holding all other variable constant.
+
+-   $1.447e^{0}$ A 1 more increase in the positive test for covid 19
+    increases the test adequacy for mortality rate per 100k different
+    from negative test by 1.447, Holding all other variable constant.
+
+-   $1.494e^0$ A 1 more increase of an individual from the
+    ZIP.Code.Location, POINT (-87.638812 41.776931) increase in
+    mortality rate per 100k more than an individual from the
+    ZIP.Code.location, POINT (-87.556037 41.653147) by 1.494, Holding
+    all other variable constant. suggesting that comparatively, there
+    are more people dying from the location to the baseline location.
+
+-   $-1.793e^0$ A 1 more increase of an individual from the
+    ZIP.Code.Location, POINT (-87.629029 41.878153) decrease in
+    mortality rate per 100k less than an individual from the
+    ZIP.Code.location, POINT (-87.556037 41.653147) by 1.793, Holding
+    all other variable constant. suggesting that comparatively less
+    people dying from covid 19 or less infected at the location to the
+    baseline location.
+
+-   etc...
+
+Analyzing the original summary model indicates that the
+
+**Testing the Model:**
+
+Testing the the model at a 95% confidence interval
+
+Model:
+
+Reduced Model: $\hat{\text{mortality_rate_per_100k}} = \beta_0$
+
+Full Model:
+$\hat{\text{mortality_rate_per_100k}} = \beta_0 + \beta_1X_{case} + \beta_2X_{test}+\beta_3X_{adq}+\beta_4X_{zip}+\dots+\beta_{60}X_{zip}$
+
+Hypothesis Test:
+
+$H_0:\beta_j =0, \forall \beta_j, j=1,\dots,60$
+
+$H_a:\exists\beta_j \neq 0, \forall \beta_j, j=1,\dots,60$
+
+Test Statistic:
+
+F-value is $26.52$ and p-value is $< 2.2e-16<0.05$
+
+Decision:
+
+The p-value $< 2.2e-16<0.05$ indicates we reject the null hypothesis and
+conclude that the model that includes case_rate_per_100k,
+test_rate_per_100k, Adequate_test and a factor(Zip.code.location) is
+statistically significant in predicting the mortality_rate_per_100k than
+no model.
+
+Testing for Homoscedasticity and Normality of the model
+
+```{r}
+#Testing Homoscedasticity and Normality;
+plot(mlrm,1)
+plot(mlrm,2)
+
+library(lmtest)
+bptest(mlrm)
+ks.test(rstandard(mlrm),"pnorm")
+#considering the plot as the test statistic
+#Normality and Homoscdasticity are violated.
+```
+
+Homoscedasticity and Normality are violated
+
+-   Testing for the relevance or improvement of the model with the Zip
+    .code.Location at 95% CI.
+
+Model:
+
+Reduced model:
+$\hat{\text{mortality_rate_per_100k}} = \beta_0 + \beta_1X_{case} + \beta_2X_{test}+\beta_3X_{adq}$
+
+Full model:
+$\hat{\text{mortality_rate_per_100k}} = \beta_0 + \beta_1X_{case} + \beta_2X_{test}+\beta_3X_{adq}+\beta_4X_{zip}+\dots+\beta_{60}X_{zip}$
+
+Hypothesis Test
+
+$H_0:\beta_j =0, \forall \beta_j, j=4,\dots,60$
+
+$H_a:\exists\beta_j \neq 0, \forall \beta_j, j=4,\dots,60$
+
+Test Statistic
+
+F-value is 9.9779 and P-value is $<2.2e^{-16}<0.05$\
+Decision:
+
+$\text{P-value is}<2.2e^{-16}<0.05$ we reject the null hypothesis and
+conclude that the inclusion of the Zip.code.Location to the model in
+predicting the mortality rate per 100k at Chicago city is statistically
+significant and improves the model.
+
+```{r}
+#Defining the relevance of the Zip code in the model
+redmod<-lm(mortality_rate_per_100k ~ 
+                    case_rate_per_100k + 
+                    test_rate_per_100k + 
+                    adequate_testing,
+                  data = PHS_final)
+anova(redmod,mlrm)
+```
+
+**VARIABLE SELECTION, POLYNOMIAL TERM INCLUSION(**If needed**) & DATA
+TRANSFORMATION**
+
+Testing for polynomial inclusion and interaction term
+
+Verification of the core independent variable to the response variable
+to identify any possible polynomial term.
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+#Testing each controlled variable
+#Testing mortality against cases of covid-19
+ggplot(PHS_final, aes(x=case_rate_per_100k, y=mortality_rate_per_100k))+geom_point()
+#Testing mortality against test for covid-19
+ggplot(PHS_final, aes(x=test_rate_per_100k, y=mortality_rate_per_100k))+geom_point()
+#Testing mortality against Geographical Location for covid-19
+ggplot(PHS_final, aes(x=as.factor(ZIP.Code.Location), y=mortality_rate_per_100k))+geom_point()
+```
+
+-   After carfully assessing all the plots above, They don't quite
+    appear to show any curve instead they are all clustered around 0 for
+    each dependent and the response variable except for
+    Zip.code.location which is a categorical data.
+
+**Log Transformation:**
+
+We perform Log transformation since there is a horn shape to the
+predicted and the residual plot and most of the points falls above the
+right corner of the 45 degrees line at the upper right corner
+
+```{r}
+#aiming to correct normality and Homoscedasticity
+new_model <- lm(log(mortality_rate_per_100k+1) ~ 
+                    case_rate_per_100k + 
+                    test_rate_per_100k + 
+                    adequate_testing+
+                  as.factor(ZIP.Code.Location),
+                  data = PHS_final)
+
+summary(new_model)
+plot(new_model,1)
+plot(new_model,2)
+#Testing the Homoscedasticity and Normality
+bptest(new_model)
+ks.test(rstandard(new_model),"pnorm")
+#Homoscedasticity and Normality are violated
+```
+
+-   The log Transformation of the model appear unsuccessful in
+    addressing the Homoscedasticity and normality
+-   Unfortunately the normality and Homoscedasticity assumption was
+    violated\
+    We may want to sort to add probably an interaction term and pursue
+    for the model subsiquently
+
+**Variable Selection:**
+
+We would want to split the zip code into numeric values such as
+Longitude and Latitude and rerun the the entire model. We may want to
+find the best model by adding an interaction term and use the step-wise
+selection criterion to select our best model.
+
+```{r}
+#Performing a linear model on the ultered data including all possible interaction term
+mlrm_new <- lm(mortality_rate_per_100k ~ 
+             case_rate_per_100k + 
+             test_rate_per_100k + 
+             adequate_testing+
+             Longitude +
+             Latitude+
+            case_rate_per_100k : test_rate_per_100k +
+            case_rate_per_100k : adequate_testing+
+            case_rate_per_100k : Longitude+
+            case_rate_per_100k : Latitude+
+            test_rate_per_100k : adequate_testing+
+            test_rate_per_100k : Longitude +
+            test_rate_per_100k : Latitude+
+            adequate_testing : Longitude +
+            adequate_testing : Latitude +
+            Longitude : Latitude,
+           data = PHS_final)
+summary(mlrm_new)
+
+#performing stepwise selection of variables
+mod_best<-step(mlrm_new,direction = "both",trace = 0)
+summary(mod_best)
+#Testing Homoscedasticity and Normality for the Amended data
+plot(mod_best,1)
+plot(mod_best,2)
+library(lmtest)
+bptest(mod_best)
+ks.test(rstandard(mod_best),"pnorm")
+```
+
+RE-
