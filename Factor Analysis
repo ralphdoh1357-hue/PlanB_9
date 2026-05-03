@@ -1,0 +1,613 @@
+{r setup, include=FALSE}
+#Chunk 1
+#Loading every session
+library(purrr)
+library(tidyr)
+library(tidyverse)
+library(ggplot2)
+library(factoextra)
+library(GPArotation)
+library(broom)
+library(psych)
+library(cluster)
+library(RColorBrewer)
+library(ggdendro)
+library(corrplot)
+library(dunn.test)
+
+#read data
+death<-read_csv("C:/Users/RALPH/Downloads/Data/death.csv")
+
+# Pivot to wide format: rows = community areas,
+# cols = specific causes of death
+wide <- death %>%
+  filter(
+    !`Cause of Death` %in% c("All Causes","All causes in males","All causes in females"),
+    !`Community Area Name` %in% "Chicago"
+  ) %>%
+  select(`Community Area Name`, `Cause of Death`, `Average Adjusted Rate 2006 - 2010`) %>%
+
+  # ── Fix the two mismatched names HERE, at the source ─────────────────
+  mutate(`Community Area Name` = recode(`Community Area Name`,
+    "Montclaire"    = "Montclare",    # remove extra 'i'
+    "Humboldt park" = "Humboldt Park",
+    "Mckinley"      = "McKinley",
+    "O'hare"        = "O'Hare" 
+  )) %>%
+  
+  pivot_wider(
+    names_from  = `Cause of Death`,
+    values_from = `Average Adjusted Rate 2006 - 2010`
+  )
+
+#Separate the ID column from numeric data
+X <- wide %>% select(-`Community Area Name`)
+
+
+#chunk 2
+#Testing if the data is fit for Factor Analysis
+#Adequacy Test
+#KMO test
+kmo_result <- KMO(X)
+print(kmo_result)
+# Look at: Overall MSA (should be > 0.80)
+
+# Bartlett's test of sphericity
+bartlett_result <- cortest.bartlett(cor(X), n = nrow(X))
+print(bartlett_result)
+# Look at: p.value (should be < 0.05)
+
+
+#chunk 3
+# PCA on scaled data (uses correlation matrix)
+pca_init <- prcomp(X, scale. = TRUE)
+
+# Eigenvalues = variance of each principal component
+eigenvalues <- pca_init$sdev^2
+print(round(eigenvalues, 3))
+
+# How many are > 1?
+sum(eigenvalues > 1)  # Kaiser criterion -> 4
+
+# Scree plot
+fviz_eig(pca_init,
+         addlabels = TRUE,
+         ncp       = 10,
+         main      = "Scree plot — eigenvalues") +
+geom_hline(yintercept = 1,
+             linetype   = "dashed",
+             colour     = "red")
+
+# Cumulative variance explained
+cumsum(eigenvalues / sum(eigenvalues))
+
+
+#chunk 4
+# ── Step 1: Run PAF ─────────────────────────────────────────────────
+fa_result <- fa(
+  r         = X,
+  nfactors  = 5,
+  rotate    = "varimax",
+  fm        = "pa",
+  scores    = "regression",
+  n.obs     = nrow(X)
+)
+
+# ── Step 2: Print loadings BEFORE any renaming ──────────────────────
+print(fa_result$loadings, cutoff = 0.30, sort = TRUE)
+cat("\nVariance explained per factor:\n")
+print(fa_result$Vaccounted)
+
+# ── Step 3: Communalities — MUST happen before colnames() rename ────
+# Save variable names directly from the original rownames
+var_names <- rownames(fa_result$loadings)
+
+# ── Communalities — computed directly from uniquenesses ───────────────
+# fa_result$communalities is returning a scalar (bug in this psych version)
+# h² = 1 - u²  is mathematically identical and always correct
+
+comm_df <- data.frame(
+  Variable = names(fa_result$uniquenesses),          # names are here, not communalities
+  u2       = round(as.numeric(fa_result$uniquenesses), 3),
+  h2       = round(1 - as.numeric(fa_result$uniquenesses), 3),  # derive h² from u²
+  stringsAsFactors = FALSE
+) %>%
+  arrange(desc(h2))
+
+print(comm_df)
+
+# ── Step 4: Factor scores with proper column names ──────────────────
+# ── Factor scores — single clean block ────────────────────────────────
+
+# Extract scores and rename columns immediately in one step
+factor_scores <- as.data.frame(fa_result$scores) %>%
+  setNames(c(
+    "F1_UrbanBurden",
+    "F2_AgeSexCancers",
+    "F3_LifestyleOrgan",
+    "F4_MetabolicVascular",
+    "F5_UnintenInjury"
+  )) %>%
+  mutate(area = wide$`Community Area Name`)
+
+# Verify columns are named correctly before printing
+print(head(factor_scores))
+# Save
+write_csv(factor_scores, "factor_scores_paf5.csv")
+
+# ── Step 5: NOW rename loadings columns ────────────────────────────
+# This comes LAST because it destroys rownames
+colnames(fa_result$loadings) <- c(
+  "F1_UrbanBurden", "F2_AgeSexCancers",
+  "F3_LifestyleOrgan", "F4_MetabolicVascular",
+  "F5_UnintenInjury"
+)
+
+
+# ── Step 6: Diagnostics ────────────────────────────────────────────
+round(cor(fa_result$scores), 3)
+
+fa.diagram(fa_result, cut = 0.40,
+           main = "Factor diagram (|loading| > 0.40)")
+
+reproduced <- fa_result$loadings %*% t(fa_result$loadings)
+residuals  <- cor(X) - reproduced
+cat("\nMax residual:", round(max(abs(residuals)), 4))
+cat("\nRMSR:", round(sqrt(mean(residuals^2)), 4))
+
+# ── Step 7: Session summary ────────────────────────────────────────
+cat("N factors retained:", fa_result$factors, "\n")   # reads from model, not hardcoded
+cat("Variance explained:", round(sum(fa_result$Vaccounted[2,]) * 100, 1), "%\n")
+
+# ── Step 8: Save ───────────────────────────────────────────────────
+write_csv(comm_df,       "communalities_paf5.csv")
+write_csv(factor_scores, "factor_scores_paf5.csv")
+write_csv(
+  as.data.frame(unclass(fa_result$loadings)) %>%
+    rownames_to_column("variable"),
+  "factor_loadings_paf5.csv"
+)
+
+
+#chunk 4
+# ── 1. Factor scores — attach names FIRST ─────────────────────────────
+scores_mat <- fa_result$scores
+rownames(scores_mat) <- wide$`Community Area Name`   
+
+# ── 2. Distance and clustering ────────────────────────────────────────
+dist_mat <- dist(scores_mat, method = "euclidean")^2
+hc       <- hclust(dist_mat, method = "ward.D")
+
+# ── 3. Dendrogram ─────────────────────────────────────────────────────
+plot(hc,
+     cex  = 0.6,
+     main = "Ward dendrogram — Chicago community areas",
+     xlab = "", sub = "")
+rect.hclust(hc, k = 6, border = c(
+  "green3","steelblue","purple","orange","coral","red"))
+
+# ── 4. Gap statistic ──────────────────────────────────────────────────
+set.seed(42)
+gap_stat <- clusGap(scores_mat,
+                    FUN       = hcut,
+                    K.max     = 10,
+                    B         = 50,
+                    hc_method = "ward.D")
+fviz_gap_stat(gap_stat)
+
+# ── 5. Cut tree ───────────────────────────────────────────────────────
+cluster_labels <- cutree(hc, k = 6)
+
+# ── 6. Verify names attached correctly ───────────────────────────────
+head(names(cluster_labels)) 
+table(cluster_labels)
+
+
+#chunk 5
+# Add cluster labels to original wide data
+X_clustered <- X
+X_clustered$cluster <- cluster_labels
+X_clustered$Community_Area <- wide$`Community Area Name`
+
+# Cluster means for each variable
+cluster_means <- X_clustered %>%
+group_by(cluster) %>%
+summarise(across(where(is.numeric), mean, .names = "{.col}")) %>%
+column_to_rownames("cluster")
+
+print(round(t(cluster_means), 1))
+
+# Cluster membership list
+X_clustered %>%
+ group_by(cluster) %>%
+  summarise(
+    n        = n(),
+    areas    = paste(Community_Area, collapse = ", ")
+  ) %>%
+ print(width = Inf)
+
+# Heatmap of cluster means
+library(pheatmap)
+pheatmap(t(scale(cluster_means)),
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         main         = "Cluster means (scaled)",
+         color        = colorRampPalette(
+           c("#185FA5","white","#D85A30"))(50))
+
+
+#chunk 6
+# Kruskal-Wallis for each variable
+kw_results <- X_clustered %>%
+ select(-Community_Area) %>%
+  pivot_longer(-cluster,
+               names_to  = "variable",
+               values_to = "value") %>%
+  group_by(variable) %>%
+  summarise(
+    H      = kruskal.test(value ~ factor(cluster))$statistic,
+    df     = kruskal.test(value ~ factor(cluster))$parameter,
+    p_val  = kruskal.test(value ~ factor(cluster))$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    sig    = case_when(p_val < 0.001 ~ "***",
+                       p_val < 0.01  ~ "**",
+                       p_val < 0.05  ~ "*",
+                       TRUE          ~ "ns"),
+    eta_sq = (H - df) / (nrow(X_clustered) - 1)
+  ) %>%
+  arrange(p_val)
+
+print(kw_results, n = Inf)
+
+
+#chunk 7
+# Run pairwise tests for one variable example
+dunn.test(
+  x              = X_clustered$`Assault (homicide)`,
+  g              = X_clustered$cluster,
+  method         = "bonferroni",
+  kw             = TRUE,
+  label          = TRUE,
+  table          = TRUE
+)
+
+# Loop over all variables
+vars_to_test <- names(X)
+
+pairwise_results <- map(vars_to_test, function(v) {
+  test <- dunn.test(
+    x      = X_clustered[[v]],
+    g      = X_clustered$cluster,
+    method = "bonferroni",
+    kw     = FALSE,
+    altp   = TRUE
+  )
+  tibble(
+    variable = v,
+    comparison = test$comparisons,
+    Z          = test$Z,
+    p_adj      = test$altP.adjusted,
+    sig        = p_adj < 0.05
+  )
+}) %>% bind_rows()
+
+# Filter to significant pairs only
+pairwise_results %>%
+ filter(sig) %>%
+ arrange(variable, comparison) %>%
+ print(n = 50)
+
+
+#chunk 8
+cl_cols <- c("1"="#639922","2"="#7F77DD","3"="#378ADD",
+               "4"="#D85A30","5"="#BA7517","6"="#E24B4A")
+
+# 1. Coloured dendrogram
+dend_data <- dendro_data(as.dendrogram(hc))
+ggplot() +
+  geom_segment(data = dend_data$segments,
+              aes(x=x, y=y, xend=xend, yend=yend),
+               linewidth = 0.4, colour = "grey50") +
+  geom_text(data = dend_data$labels,
+            aes(x=x, y=-0.5, label=label,
+                colour = as.character(cluster_labels[
+                  match(label, wide$`Community Area Name`)])),
+            angle = 90, hjust = 1, size = 2.5) +
+  scale_colour_manual(values = cl_cols, name = "Cluster") +
+  geom_hline(yintercept = 6.5, linetype = "dashed",
+             colour = "red") +
+  theme_minimal() +
+  labs(title = "Ward dendrogram — k = 6")
+
+# 2. Boxplots by cluster for top variable
+X_clustered %>%
+ ggplot(aes(x = factor(cluster),
+             y = `Assault (homicide)`,
+             fill = factor(cluster))) +
+  geom_boxplot(alpha = 0.8, outlier.size = 1.5) +
+  scale_fill_manual(values = cl_cols) +
+  labs(title = "Assault mortality rate by cluster",
+       x = "Cluster", y = "Adjusted rate",
+       fill = "Cluster") +
+  theme_minimal()
+
+# 3. Radar/spider chart using fmsb
+library(fmsb)
+radar_data <- rbind(
+  apply(cluster_means, 2, max),
+  apply(cluster_means, 2, min),
+  cluster_means
+)
+radarchart(radar_data, axistype = 1,
+           pcol = unname(cl_cols),
+           plwd = 2, plty = 1,
+           title = "Cluster profiles")
+
+
+#chunk 8
+cl_cols <- c("1"="#639922","2"="#7F77DD","3"="#378ADD",
+               "4"="#D85A30","5"="#BA7517","6"="#E24B4A")
+
+# 1. Coloured dendrogram
+dend_data <- dendro_data(as.dendrogram(hc))
+ggplot() +
+  geom_segment(data = dend_data$segments,
+              aes(x=x, y=y, xend=xend, yend=yend),
+               linewidth = 0.4, colour = "grey50") +
+  geom_text(data = dend_data$labels,
+            aes(x=x, y=-0.5, label=label,
+                colour = as.character(cluster_labels[
+                  match(label, wide$`Community Area Name`)])),
+            angle = 90, hjust = 1, size = 2.5) +
+  scale_colour_manual(values = cl_cols, name = "Cluster") +
+  geom_hline(yintercept = 6.5, linetype = "dashed",
+             colour = "red") +
+  theme_minimal() +
+  labs(title = "Ward dendrogram — k = 6")
+
+# 2. Boxplots by cluster for top variable
+X_clustered %>%
+ ggplot(aes(x = factor(cluster),
+             y = `Assault (homicide)`,
+             fill = factor(cluster))) +
+  geom_boxplot(alpha = 0.8, outlier.size = 1.5) +
+  scale_fill_manual(values = cl_cols) +
+  labs(title = "Assault mortality rate by cluster",
+       x = "Cluster", y = "Adjusted rate",
+       fill = "Cluster") +
+  theme_minimal()
+
+# 3. Radar/spider chart using fmsb
+library(fmsb)
+radar_data <- rbind(
+  apply(cluster_means, 2, max),
+  apply(cluster_means, 2, min),
+  cluster_means
+)
+radarchart(radar_data, axistype = 1,
+           pcol = unname(cl_cols),
+           plwd = 2, plty = 1,
+           title = "Cluster profiles")
+
+
+#chunk 9
+# Save cluster assignments
+cluster_output <- wide %>%
+  mutate(cluster = cluster_labels) %>%
+  select(`Community Area Name`, cluster)
+
+write_csv(cluster_output, "cluster_assignments.csv")
+
+# Save cluster means (Table 3 equivalent)
+write_csv(
+  cluster_means %>%
+   rownames_to_column("cluster") %>%
+   mutate(across(where(is.numeric), ~round(.x, 1))),
+  "cluster_means_table3.csv"
+)
+
+# Save KW results
+write_csv(kw_results, "kruskal_wallis_results.csv")
+
+# Save pairwise results
+write_csv(pairwise_results, "pairwise_bonferroni.csv")
+
+# Save factor loadings
+loadings_df <- as.data.frame(
+  unclass(fa_result$loadings)) %>%
+  rownames_to_column("variable") %>%
+  mutate(across(where(is.numeric), ~round(.x, 3)))
+
+write_csv(loadings_df, "factor_loadings.csv")
+
+# Full session summary
+cat("Analysis complete\n")
+cat("N community areas:", nrow(wide), "\n")
+cat("N variables:", ncol(X), "\n")
+cat("N factors retained:", 5, "\n")
+cat("Variance explained:", round(
+sum(fa_result$Vaccounted[2,]) * 100, 1), "%\n")
+cat("N clusters:", 6, "\n")
+
+
+#chunk 10
+library(tidyverse)
+library(leaflet)
+library(htmlwidgets)
+
+# ── 1. Build cluster_df from named cluster_labels ──────────────────────
+cluster_df <- tibble(
+  name    = names(cluster_labels),
+  cluster = as.integer(cluster_labels)
+)
+
+# ── 2. Lookup tables ───────────────────────────────────────────────────
+cl_colors <- c("1"="#639922","2"="#7F77DD","3"="#378ADD",
+               "4"="#D85A30","5"="#BA7517","6"="#E24B4A")
+
+cl_labels <- c(
+  "1" = "Low Mortality — NW Communities",
+  "2" = "Moderate Mixed Mortality",
+  "3" = "Lowest CVD Burden — Inner Lakefront",
+  "4" = "High Violence & Multi-Cause Burden",
+  "5" = "Age/Sex-Specific Cancer Burden",
+  "6" = "Extreme Violence Cluster"
+)
+
+cl_signature <-c(
+  "1" = "Assault: 7.0 | Cancer: 189.2 — low mortality NW",
+  "2" = "Assault: 10.5 | Liver disease: 12.1 — moderate mixed",
+  "3" = "Coronary HD: 99.5 — lowest CVD burden",
+  "4" = "Assault: 43.3 | Firearm: 36.2 — high violence burden",
+  "5" = "Breast cancer: 38.4 | Alzheimers: 20.5 — age/sex cancers",
+  "6" = "Assault: 52.2 | Firearm: 50.3 — extreme violence (n=4)"
+)
+
+# ── 3. Top cause per community area ───────────────────────────────────
+top_cause <- death %>%
+  filter(!`Cause of Death` %in%
+           c("All Causes","All causes in males","All causes in females"),
+         !`Community Area Name` %in% "Chicago") %>%
+  group_by(`Community Area Name`) %>%
+  slice_max(`Average Adjusted Rate 2006 - 2010`, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(
+    name      = `Community Area Name`,
+    top_cause = `Cause of Death`,
+    top_rate  = `Average Adjusted Rate 2006 - 2010`
+  )
+
+# ── 4. Centroids ───────────────────────────────────────────────────────
+ca_coords <- tribble(
+  ~name,                       ~lat,     ~lon,
+  "Rogers Park",               41.998, -87.664,
+  "West Ridge",                41.998, -87.693,
+  "Uptown",                    41.978, -87.655,
+  "Lincoln Square",            41.968, -87.699,
+  "North Center",              41.956, -87.672,
+  "Lake View",                 41.944, -87.651,
+  "Lincoln Park",              41.922, -87.643,
+  "Near North Side",           41.898, -87.632,
+  "Edison Park",               42.008, -87.811,
+  "Norwood Park",              42.007, -87.788,
+  "Jefferson Park",            41.995, -87.766,
+  "Forest Glen",               41.995, -87.747,
+  "North Park",                41.983, -87.730,
+  "Albany Park",               41.968, -87.724,
+  "Portage Park",              41.958, -87.764,
+  "Irving Park",               41.954, -87.730,
+  "Dunning",                   41.940, -87.781,
+  "Montclare",                 41.921, -87.782,
+  "Belmont Cragin",            41.921, -87.764,
+  "Hermosa",                   41.921, -87.740,
+  "Avondale",                  41.931, -87.718,
+  "Logan Square",              41.921, -87.705,
+  "Humboldt Park",             41.900, -87.723,
+  "West Town",                 41.884, -87.673,
+  "Austin",                    41.895, -87.753,
+  "West Garfield Park",        41.880, -87.753,
+  "East Garfield Park",        41.880, -87.726,
+  "Near West Side",            41.876, -87.672,
+  "North Lawndale",            41.866, -87.722,
+  "South Lawndale",            41.851, -87.711,
+  "Lower West Side",           41.851, -87.663,
+  "Loop",                      41.883, -87.629,
+  "Near South Side",           41.866, -87.625,
+  "Armour Square",             41.852, -87.631,
+  "Douglas",                   41.838, -87.617,
+  "Oakland",                   41.829, -87.601,
+  "Fuller Park",               41.808, -87.629,
+  "Grand Boulevard",           41.822, -87.617,
+  "Kenwood",                   41.799, -87.595,
+  "Washington Park",           41.791, -87.620,
+  "Hyde Park",                 41.795, -87.594,
+  "Woodlawn",                  41.778, -87.594,
+  "South Shore",               41.760, -87.570,
+  "Chatham",                   41.747, -87.609,
+  "Avalon Park",               41.746, -87.578,
+  "South Chicago",             41.742, -87.546,
+  "Burnside",                  41.724, -87.596,
+  "Calumet Heights",           41.724, -87.568,
+  "Roseland",                  41.700, -87.590,
+  "Pullman",                   41.711, -87.563,
+  "South Deering",             41.695, -87.543,
+  "East Side",                 41.717, -87.530,
+  "West Pullman",              41.678, -87.610,
+  "Riverdale",                 41.650, -87.616,
+  "Hegewisch",                 41.648, -87.520,
+  "Garfield Ridge",            41.839, -87.773,
+  "Archer Heights",            41.833, -87.736,
+  "Brighton Park",             41.818, -87.700,
+  "McKinley Park",             41.839, -87.686,
+  "Bridgeport",                41.840, -87.647,
+  "New City",                  41.813, -87.657,
+  "West Elsdon",               41.789, -87.764,
+  "Gage Park",                 41.800, -87.723,
+  "Clearing",                  41.783, -87.782,
+  "West Lawn",                 41.785, -87.703,
+  "Chicago Lawn",              41.773, -87.677,
+  "West Englewood",            41.780, -87.649,
+  "Englewood",                 41.779, -87.628,
+  "Greater Grand Crossing",    41.760, -87.611,
+  "Ashburn",                   41.747, -87.703,
+  "Auburn Gresham",            41.748, -87.659,
+  "Beverly",                   41.721, -87.666,
+  "Washington Heights",        41.700, -87.649,
+  "Mount Greenwood",           41.703, -87.711,
+  "Morgan Park",               41.688, -87.666,
+  "O'Hare",                    41.979, -87.905,
+  "Edgewater",                 41.988, -87.658
+)
+
+
+# ── 5. Join everything ────────────────────────────────────────────────
+map_data <- ca_coords %>%
+  left_join(cluster_df, by = "name") %>%
+  left_join(top_cause,  by = "name") %>%
+  mutate(
+    cl         = as.character(cluster),
+    fill_color = unname(cl_colors[cl]),
+    cl_label   = unname(cl_labels[cl]),
+    cl_sig     = unname(cl_signature[cl]),
+    popup_text = paste0(
+      "<b style='font-size:14px'>", name, "</b><br>",
+      "<span style='color:", fill_color, ";font-weight:500'>",
+      "Cluster ", cluster, " — ", cl_label, "</span><br><br>",
+      "<b>Cluster signature:</b> ", cl_sig, "<br>",
+      "<b>Top cause:</b> ", top_cause, "<br>",
+      "<b>Rate:</b> ", round(top_rate, 1), " per 100,000"
+    )
+  )
+
+# ── 6. Sanity check ───────────────────────────────────────────────────
+cat("Unmatched areas:", sum(is.na(map_data$cluster)), "\n")
+stopifnot("Still mismatches — check names" = sum(is.na(map_data$cluster)) == 0)
+print(map_data %>% count(cluster, fill_color))
+
+# ── 7. Build map ──────────────────────────────────────────────────────
+map <- leaflet(map_data) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  setView(lng = -87.68, lat = 41.83, zoom = 11) %>%
+  addCircleMarkers(
+    lng          = ~lon,        lat         = ~lat,
+    radius       = 10,          weight      = 1.5,
+    color        = "white",     fillColor   = ~fill_color,
+    fillOpacity  = 0.85,
+    popup        = ~popup_text, label       = ~name,
+    labelOptions = labelOptions(style = list("font-size" = "12px"))
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    colors   = unname(cl_colors),
+    labels   = paste0("Cluster ", names(cl_colors), " — ", unname(cl_labels)),
+    title    = "<b>Ward cluster (k = 6)</b>",
+    opacity  = 0.85
+  )
+
+map
+
+# ── 8. Save ───────────────────────────────────────────────────────────
+saveWidget(map, file.path(getwd(), "chicago_cluster_map.html"),
+           selfcontained = TRUE)
