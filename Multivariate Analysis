@@ -1,0 +1,821 @@
+#######chunk 1
+ahies<-read.csv("C:/Users/RALPH/Downloads/Data/RHExpenses.csv")
+clean_numeric <- function(x) {
+  # Remove commas, dollar signs, spaces, and other non-numeric characters
+  x <- gsub(",", "", x)           # Remove commas
+  x <- gsub("\\$", "", x)         # Remove dollar signs
+  x <- gsub("%", "", x)           # Remove percent signs
+  x <- gsub(" ", "", x)           # Remove spaces
+  x <- gsub("N/A|NA|na", NA, x)   # Replace text NA with actual NA
+  x <- gsub("-", NA, x)           # Replace dashes with NA
+  
+  # Convert to numeric
+  as.numeric(x)
+}
+
+# Apply cleaning function
+clean_ahies <- ahies
+for (i in 1:47) {
+  clean_ahies[, i] <- clean_numeric(ahies[, i])
+}
+
+# Verify conversion
+cat("\nAfter cleaning:\n")
+cat("Annual Household Income & Exenditure survey", 
+    class(clean_ahies), "\n")
+
+#Checking for missing values
+
+
+#######chunk 2
+#Variabbles Selection: Selecting discret variables from the pull of data tha suits MVN
+ahies<-data.frame(final_ahies[,c(29,34,47)])
+head(ahies)
+
+
+#######chunk 3
+#Marginal Normality Assessment
+par(mfrow=c(3,5))  # 3 rows, 5 columns for plots
+vars<-colnames(ahies)
+for(var in vars) {
+  x <- ahies[[var]]
+  
+  # 1. Histogram with normal overlay
+  hist(x, prob=TRUE, main=paste("Histogram of", var),
+       xlab=var, col="lightblue")
+  curve(dnorm(x, mean=mean(ahies[[var]]), sd=sd(ahies[[var]])), 
+        add=TRUE, col="red", lwd=2)
+  
+  # 2. Q-Q Plot
+  qqnorm(x, main=paste("Q-Q Plot:", var))
+  qqline(x, col="red", lwd=2)
+  
+  # 3. Box Plot
+  boxplot(x, main=paste("Boxplot:", var), col="lightgreen")
+}
+
+# Numerical summaries
+library(moments)  # for skewness and kurtosis
+
+summary_stats <- data.frame(
+  Variable = vars,
+  Mean = sapply(ahies[vars], mean),
+  Median = sapply(ahies[vars], median),
+  SD = sapply(ahies[vars], sd),
+  Skewness = sapply(ahies[vars], skewness),
+  Kurtosis = sapply(ahies[vars], kurtosis) - 3,  # excess kurtosis
+  SW_statistic = sapply(ahies[vars], function(x) shapiro.test(x)$statistic),
+  SW_pvalue = sapply(ahies[vars], function(x) shapiro.test(x)$p.value)
+)
+
+print(summary_stats)
+
+
+#######chunk 4
+library(MASS)
+library(moments)  # for skewness()
+
+# Create a new data frame to store transformed variables
+transformed_data <- ahies  # Start with original data
+
+# Store transformation information
+transformation_log <- data.frame(
+  Variable = character(),
+  Best_Transformation = character(),
+  Lambda = numeric(),
+  Original_pvalue = numeric(),
+  Transformed_pvalue = numeric(),
+  Skewness_Original = numeric(),
+  Skewness_Transformed = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# ── Helper: pick the best transformation by highest Shapiro-Wilk p-value ──────
+
+try_all_transformations <- function(x, var_name) {
+  
+  results <- list()
+  
+  # ── 0. Shift to positive if needed ─────────────────────────────────────────
+  x_pos <- x
+  shift  <- 0
+  if (min(x, na.rm = TRUE) <= 0) {
+    shift  <- abs(min(x, na.rm = TRUE)) + 1
+    x_pos  <- x + shift
+  }
+  
+  # ── 1. Log transformation  (for right-skewed, strictly positive) ────────────
+  tryCatch({
+    x_log <- log(x_pos)
+    sw    <- shapiro.test(x_log)
+    results[["Log"]] <- list(
+      x_trans  = x_log,
+      name     = ifelse(shift > 0,
+                        paste0("log(x + ", round(shift,2), ")"),
+                        "log(x)"),
+      lambda   = NA_real_,
+      pvalue   = sw$p.value
+    )
+  }, error = function(e) NULL)
+  
+  # ── 2. Square-root transformation  (moderate right skew, non-negative) ──────
+  tryCatch({
+    x_sqrt <- sqrt(x_pos)
+    sw     <- shapiro.test(x_sqrt)
+    results[["Sqrt"]] <- list(
+      x_trans = x_sqrt,
+      name    = ifelse(shift > 0,
+                       paste0("sqrt(x + ", round(shift,2), ")"),
+                       "sqrt(x)"),
+      lambda  = 0.5,
+      pvalue  = sw$p.value
+    )
+  }, error = function(e) NULL)
+  
+  # ── 3. Cube-root transformation  (handles zero & negative values) ────────────
+  tryCatch({
+    x_cbrt <- sign(x) * abs(x)^(1/3)
+    sw     <- shapiro.test(x_cbrt)
+    results[["Cube_Root"]] <- list(
+      x_trans = x_cbrt,
+      name    = "cbrt(x)",
+      lambda  = 1/3,
+      pvalue  = sw$p.value
+    )
+  }, error = function(e) NULL)
+  
+  # ── 4. Reciprocal (1/x)  (severe right skew) ────────────────────────────────
+  tryCatch({
+    x_rec <- 1 / x_pos
+    sw    <- shapiro.test(x_rec)
+    results[["Reciprocal"]] <- list(
+      x_trans = x_rec,
+      name    = ifelse(shift > 0,
+                       paste0("1/(x + ", round(shift,2), ")"),
+                       "1/x"),
+      lambda  = -1,
+      pvalue  = sw$p.value
+    )
+  }, error = function(e) NULL)
+  
+  # ── 5. Square transformation  (left-skewed data) ────────────────────────────
+  tryCatch({
+    x_sq <- x^2
+    sw   <- shapiro.test(x_sq)
+    results[["Square"]] <- list(
+      x_trans = x_sq,
+      name    = "x^2",
+      lambda  = 2,
+      pvalue  = sw$p.value
+    )
+  }, error = function(e) NULL)
+  
+  # ── 6. Box-Cox transformation  (optimal lambda, strictly positive) ───────────
+  tryCatch({
+    bc         <- boxcox(lm(x_pos ~ 1), lambda = seq(-3, 3, 0.05), plotit = FALSE)
+    lambda_opt <- bc$x[which.max(bc$y)]
+    
+    x_bc <- if (abs(lambda_opt) < 0.01) {
+      log(x_pos)
+    } else {
+      (x_pos^lambda_opt - 1) / lambda_opt
+    }
+    
+    sw <- shapiro.test(x_bc)
+    results[["Box_Cox"]] <- list(
+      x_trans = x_bc,
+      name    = ifelse(abs(lambda_opt) < 0.01,
+                       "Box-Cox: log",
+                       paste0("Box-Cox(λ=", round(lambda_opt, 2), ")")),
+      lambda  = lambda_opt,
+      pvalue  = sw$p.value
+    )
+  }, error = function(e) NULL)
+  
+  # ── 7. Yeo-Johnson transformation  (works with negative values too) ──────────
+  tryCatch({
+    yj_obj  <- powerTransform(x ~ 1, family = "yjPower")
+    lam_yj  <- coef(yj_obj, round = FALSE)
+    x_yj    <- yjPower(x, lambda = lam_yj)
+    sw      <- shapiro.test(x_yj)
+    results[["Yeo_Johnson"]] <- list(
+      x_trans = x_yj,
+      name    = paste0("Yeo-Johnson(λ=", round(lam_yj, 2), ")"),
+      lambda  = lam_yj,
+      pvalue  = sw$p.value
+    )
+  }, error = function(e) NULL)
+  
+  # ── 8. Arcsine-square-root  (proportions / percentages in [0,1]) ─────────────
+  tryCatch({
+    if (max(x, na.rm = TRUE) <= 1 && min(x, na.rm = TRUE) >= 0) {
+      x_asin <- asin(sqrt(x))
+      sw     <- shapiro.test(x_asin)
+      results[["Arcsine"]] <- list(
+        x_trans = x_asin,
+        name    = "asin(sqrt(x))",
+        lambda  = NA_real_,
+        pvalue  = sw$p.value
+      )
+    }
+  }, error = function(e) NULL)
+  
+  # ── 9. Logit transformation  (proportions strictly in (0,1)) ────────────────
+  tryCatch({
+    if (max(x, na.rm = TRUE) < 1 && min(x, na.rm = TRUE) > 0) {
+      x_logit <- log(x / (1 - x))
+      sw      <- shapiro.test(x_logit)
+      results[["Logit"]] <- list(
+        x_trans = x_logit,
+        name    = "logit(x)",
+        lambda  = NA_real_,
+        pvalue  = sw$p.value
+      )
+    }
+  }, error = function(e) NULL)
+  
+  # ── 10. Negative log  (left-skewed, positive values) ────────────────────────
+  tryCatch({
+    if (skewness(x, na.rm = TRUE) < -0.5) {
+      x_neglog <- -log(max(x_pos, na.rm = TRUE) + 1 - x_pos)
+      sw       <- shapiro.test(x_neglog)
+      results[["Neg_Log"]] <- list(
+        x_trans = x_neglog,
+        name    = "-log(max-x+1)",
+        lambda  = NA_real_,
+        pvalue  = sw$p.value
+      )
+    }
+  }, error = function(e) NULL)
+  
+  return(results)
+}
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+
+for (var in vars) {
+  
+  orig_pval  <- summary_stats$SW_pvalue[summary_stats$Variable == var]
+  is_normal  <- orig_pval >= 0.05
+  
+  if (!is_normal) {
+    
+    x <- ahies[[var]]
+    cat("\n", strrep("─", 55), "\n")
+    cat("Variable:", var, "\n")
+    cat("Original Shapiro-Wilk p-value:", round(orig_pval, 4), "\n")
+    cat("Skewness:", round(skewness(x, na.rm = TRUE), 3), "\n\n")
+    
+    # Try every transformation
+    all_results <- try_all_transformations(x, var)
+    
+    if (length(all_results) == 0) {
+      cat("  ⚠ No transformations succeeded for", var, "\n")
+      next
+    }
+    
+    # Print results table for all transformations tried
+    cat(sprintf("  %-30s %10s\n", "Transformation", "SW p-value"))
+    cat("  ", strrep("-", 42), "\n", sep = "")
+    for (nm in names(all_results)) {
+      cat(sprintf("  %-30s %10.4f%s\n",
+                  all_results[[nm]]$name,
+                  all_results[[nm]]$pvalue,
+                  ifelse(all_results[[nm]]$pvalue >= 0.05, "  ✔ NORMAL", "")))
+    }
+    
+    # ── Select best transformation ─────────────────────────────────────────
+    best_name <- names(which.max(sapply(all_results, `[[`, "pvalue")))
+    best      <- all_results[[best_name]]
+    
+    cat("\n  ★ Best transformation:", best$name,
+        "  (p =", round(best$pvalue, 4), ")\n")
+    
+    # Apply best transformation to the data frame
+    transformed_data[[var]] <- best$x_trans
+    
+    # ── QQ plots: original vs best ─────────────────────────────────────────
+    par(mfrow = c(1, 2))
+    qqnorm(x,             main = paste("Original:", var));      qqline(x,             col = "red")
+    qqnorm(best$x_trans,  main = paste(best$name));             qqline(best$x_trans,  col = "blue")
+    
+    # ── Log transformation details ─────────────────────────────────────────
+    transformation_log <- rbind(transformation_log, data.frame(
+      Variable              = var,
+      Best_Transformation   = best$name,
+      Lambda                = ifelse(is.null(best$lambda) || is.na(best$lambda),
+                                     NA_real_, best$lambda),
+      Original_pvalue       = orig_pval,
+      Transformed_pvalue    = best$pvalue,
+      Skewness_Original     = round(skewness(x,            na.rm = TRUE), 3),
+      Skewness_Transformed  = round(skewness(best$x_trans, na.rm = TRUE), 3)
+    ))
+    
+  } else {
+    cat("\nVariable:", var, "— already normal (p =",
+        round(orig_pval, 4), ") — no transformation needed\n")
+  }
+}
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+cat("\n", strrep("═", 55), "\n")
+cat("           TRANSFORMATION SUMMARY\n")
+cat(strrep("═", 55), "\n")
+print(transformation_log)
+
+cat("\n===== TRANSFORMED DATA (first 6 rows) =====\n")
+head(transformed_data)
+
+# Uncomment to save:
+#write.csv(transformed_data, "transformed_data.csv", row.names = FALSE)
+cat("\n=== Total Missing Values ===\n")
+cat("Total NAs:", sum(is.na(clean_ahies)), "\n")
+final_ahies<-na.omit(clean_ahies)
+
+
+#######chunk 5
+# Re-calculate summary statistics for transformed data
+library(moments)
+
+summary_stats_transformed <- data.frame(
+  Variable = vars,
+  Mean = sapply(transformed_data[vars], mean, na.rm=TRUE),
+  Median = sapply(transformed_data[vars], median, na.rm=TRUE),
+  SD = sapply(transformed_data[vars], sd, na.rm=TRUE),
+  Skewness = sapply(transformed_data[vars], skewness, na.rm=TRUE),
+  Kurtosis = sapply(transformed_data[vars], function(x) kurtosis(x, na.rm=TRUE) - 3),
+  SW_statistic = sapply(transformed_data[vars], function(x) shapiro.test(x)$statistic),
+  SW_pvalue = sapply(transformed_data[vars], function(x) shapiro.test(x)$p.value)
+)
+
+# Round for display
+summary_stats_transformed[, 2:8] <- round(summary_stats_transformed[, 2:8], 4)
+
+cat("\n===== TRANSFORMED DATA SUMMARY STATISTICS =====\n")
+print(summary_stats_transformed)
+
+# Compare original vs transformed
+comparison <- data.frame(
+  Variable = vars,
+  Original_pvalue = round(summary_stats$SW_pvalue, 4),
+  Transformed_pvalue = round(summary_stats_transformed$SW_pvalue, 4),
+  Improvement = round(summary_stats_transformed$SW_pvalue - summary_stats$SW_pvalue, 4),
+  Original_Normal = ifelse(summary_stats$SW_pvalue > 0.05, "Yes", "No"),
+  Transformed_Normal = ifelse(summary_stats_transformed$SW_pvalue > 0.05, "Yes", "No")
+)
+
+cat("\n===== COMPARISON: ORIGINAL VS TRANSFORMED =====\n")
+print(comparison)
+
+
+#######chunk 6
+# Calculate Mahalanobis distances
+X <- as.matrix(transformed_data[vars])
+n <- nrow(X)
+p <- ncol(X)
+
+xbar <- colMeans(X)
+S <- cov(X)
+S_inv <- solve(S)
+
+# Calculate squared distances
+d_squared <- numeric(n)
+for(j in 1:n) {
+  dev <- X[j,] - xbar
+  d_squared[j] <- t(dev) %*% S_inv %*% dev
+}
+
+# Order the distances
+d_ordered <- sort(d_squared)
+
+# Calculate theoretical chi-square quantiles
+q_theoretical <- qchisq((1:n - 0.5)/n, df=p)
+
+# Create chi-square Q-Q plot
+plot(q_theoretical, d_ordered,
+     xlab="Chi-square(5) quantiles",
+     ylab="Ordered Mahalanobis distances",
+     main="Chi-square Q-Q Plot for Multivariate Normality")
+abline(0, 1, col="red", lwd=2)
+
+# Calculate correlation (measure of linearity)
+cor_qq <- cor(q_theoretical, d_ordered)
+print(paste("Correlation:", round(cor_qq, 3)))
+
+# Expected proportions for chi-square(5)
+prob_levels <- c(0.25, 0.50, 0.75, 0.90)
+chi_critical <- qchisq(prob_levels, df=5)
+
+proportions_observed <- sapply(chi_critical, 
+                               function(c) sum(d_squared <= c)/n)
+
+comparison <- data.frame(
+  Expected = prob_levels,
+  Critical_Value = chi_critical,
+  Observed = proportions_observed,
+  Difference = proportions_observed - prob_levels
+)
+
+print(comparison)
+
+library(MVN)
+#The following Test, Tests for multivariate nomality of variables
+
+#Aderson-Darlin Test for MVN
+#AD_mvn<-mvnTest::AD.test(dat[vars])
+#AD_mvn
+#Cramer-von Mises test for MVN
+#CM_test<-mvnTest::CM.test(dat[vars])
+#CM_test
+#Henz Zirkler test for MVN
+HZ_mvn<- mvnTest::HZ.test(transformed_data[vars])
+HZ_mvn
+#Chi-squared type test for mvn
+Chisq_test<-mvnTest::S2.test(transformed_data[vars])
+Chisq_test
+
+
+#######chunk 7
+#computing for the correlation matrix to better understand the strength of the relationship between variables
+#This also helps to identify possible colinearity
+r<-cor(ahies)
+r
+
+
+#######chunk 8
+n<-nrow(ahies)
+p<-ncol(ahies)
+Xbar<-colMeans(ahies)
+cov_test<-cov(ahies)
+# Null hypothesis mean
+mu0 <- c(25, 2000, 1750)
+#Computing for Hotelling T2
+dev<-Xbar-mu0
+invers<-solve(cov_test)
+T2<-n*t(dev)%*%invers%*%dev
+T2
+
+#computing for the estimated approximated F-value and EXpected F-value
+Est_Fv<-((n-p)/((n-1)*p))*T2
+Est_Fv
+Exp_Fv<-qf(0.05,p,n-p, lower.tail = F)
+Exp_Fv
+#The Estimated F-value is greater than the Expected F-value then we reject Null hypothesis
+
+#Comuputing for P_value
+p_value<-pf(Est_Fv,p,n-p,lower.tail = F)
+p_value
+
+#critical value also Known as the scaling constant (t2)
+Critv<-(((n-1)*p)/(n-p))*qf(0.05,p,n-p, lower.tail = F)
+Critv
+
+#computing for the length and direction of possibly the location of the true mean
+# Eigenvalue decomposition of S
+eigen_S <- eigen(cov_test)
+eigenval <- eigen_S$values
+eigenvect <- eigen_S$vectors
+# Calculate half-lengths of ellipsoid axes
+half_lengths <- sqrt(Critv * eigenval / n)
+
+for(i in 1:p) {
+  cat("Axis", i, ": length =", 2*half_lengths[i], "\n")
+  cat("  Direction (eigenvector):", eigenvect[,i], "\n")
+}
+# Create summary table
+axes_summary <- data.frame(
+  Axis = 1:p,
+  Eigenvalue = eigenval,
+  Half_Length = half_lengths,
+  Full_Length = 2 * half_lengths,
+  Direction_BMI = eigenvect[1,],
+  Direction_Edu_Expenses = eigenvect[2,],
+  Direction_Income = eigenvect[3,]
+)
+print(axes_summary)
+
+# Set up plotting area
+par(mfrow=c(2,3))
+
+# Variable names
+var_names <- c("BMI", "Edu_Expenses", "Income")
+
+# Q-Q plots for each variable
+for(i in 1:3) {
+  qqnorm(transformed_data[,i], main=paste("Q-Q Plot:", var_names[i]))
+  qqline(transformed_data[,i], col="red", lwd=2)
+}
+
+# Shapiro-Wilk tests
+for(i in 1:3) {
+  sw_test <- shapiro.test(transformed_data[,i])
+  cat("\n", var_names[i], ":\n", sep="")
+  cat("  Shapiro-Wilk W =", sw_test$statistic, "\n")
+  cat("  P-value =", sw_test$p.value, "\n")
+  if(sw_test$p.value > 0.05) {
+    cat("  Conclusion: Consistent with normality\n")
+  } else {
+    cat("  Conclusion: Significant departure from normality\n")
+  }
+}
+
+# Histograms with normal overlay
+for(i in 1:3) {
+  hist(transformed_data[,i], prob=TRUE, main=paste("Histogram:", var_names[i]),
+       xlab=var_names[i], col="lightblue", breaks=15)
+  curve(dnorm(x, mean=mean(transformed_data[,i]), sd=sd(transformed_data[,i])), 
+        add=TRUE, col="red", lwd=2)
+}
+
+
+########Chunk 9
+ahies_1<-data.frame(transformed_data[1:1424,1:3]) #Data for first half (n1=1424)
+ahies_2 <- data.frame(transformed_data[1425:2854,1:3])# ── Data: second half (n2=1430) 
+colnames(ahies_1) <- colnames(ahies_2) <- c("BMI","Edu_Expenses","Income")
+n1 <- nrow(ahies_1)   # 1424
+n2 <- nrow(ahies_2)     # 1430
+p  <- 3
+alpha <- 0.05
+
+# FUNCTION: Two-sample Hotelling T² analysis
+hotelling_two_sample <- function(grp1, grp2, alpha=0.01,
+                                  label1="Group1", label2="Group2",
+                                  show_details=TRUE) {
+  n1 <- nrow(grp1); n2 <- nrow(grp2); p <- ncol(grp1)
+
+  x1  <- colMeans(grp1);  x2  <- colMeans(grp2)
+  S1  <- cov(grp1);       S2  <- cov(grp2)
+  d   <- x1 - x2
+
+  # Pooled covariance
+  Sp  <- ((n1-1)*S1 + (n2-1)*S2) / (n1+n2-2)
+
+  # T² statistic
+  T2  <- as.numeric(t(d) %*% solve((1/n1+1/n2)*Sp) %*% d)
+
+  # Critical value & F-stat
+  df1    <- p
+  df2    <- n1+n2-p-1
+  F_crit <- qf(alpha, df1, df2, lower.tail=FALSE)
+  crit   <- p*(n1+n2-2)/(n1+n2-p-1) * F_crit
+  F_stat <- (n1+n2-p-1)/(p*(n1+n2-2)) * T2
+  p_val  <- pf(F_stat, df1, df2, lower.tail=FALSE)
+
+  if (show_details) {
+    cat(sprintf("\n%s (n=%d)  vs  %s (n=%d)\n",label1,n1,label2,n2))
+    cat(sprintf("  %-12s  %s\n","","BMI   Edu_Expenses  Income"))
+    cat(sprintf("  %-12s  %.4f  %.4f  %.4f\n",
+                paste0("x̄(",label1,")"), x1[1],x1[2],x1[3]))
+    cat(sprintf("  %-12s  %.4f  %.4f  %.4f\n",
+                paste0("x̄(",label2,")"), x2[1],x2[2],x2[3]))
+    cat(sprintf("  %-12s  %.4f  %.4f  %.4f\n",
+                "Difference", d[1],d[2],d[3]))
+    cat(sprintf("\n  T² statistic    : %.4f\n", T2))
+    cat(sprintf("  Critical c²     : %.4f\n", crit))
+    cat(sprintf("  F-statistic     : %.4f\n", F_stat))
+    cat(sprintf("  df              : (%d, %d)\n", df1, df2))
+    cat(sprintf("  P-value         : %.6f\n", p_val))
+    cat(sprintf("  Decision        : %s H0 at α=%.2f\n",
+                ifelse(p_val<alpha,"REJECT","FAIL TO REJECT"), alpha))
+  }
+
+  list(x1=x1, x2=x2, d=d, Sp=Sp, S1=S1, S2=S2,
+       T2=T2, crit=crit, F_stat=F_stat, p_val=p_val,
+       n1=n1, n2=n2, p=p, alpha=alpha, df1=df1, df2=df2)
+}
+
+# (a) TEST FOR EQUAL MEAN COST VECTORS
+
+cat("(a) TEST H0: μ_ahies_1 = μ_ahies_2   [α = 0.05]\n")
+
+res <- hotelling_two_sample(ahies_1, ahies_2, alpha,
+                             "ahies_1","ahies_2")
+
+cat("\n── Pooled Covariance Matrix (Spooled) -\n")
+print(round(res$Sp, 6))
+
+# (b) LINEAR COMBINATION MOST RESPONSIBLE FOR REJECTION
+#     Discriminant direction: â = Sp⁻¹(x̄₁ - x̄₂)
+
+cat("(b) LINEAR COMBINATION MOST RESPONSIBLE FOR REJECTION\n")
+cat("    â = Sp⁻¹ (x̄₁ - x̄₂)\n")
+
+a_hat <- solve(res$Sp) %*% res$d
+a_hat_norm <- a_hat / sqrt(sum(a_hat^2))   # normalised
+
+cat("\nRaw discriminant vector â:\n")
+for(i in 1:p) cat(sprintf("  â_%d (%-10s): %8.4f\n",
+                           i, colnames(ahies_1)[i], a_hat[i]))
+
+cat("\nNormalized â:\n")
+for(i in 1:p) cat(sprintf("  â_%d (%-10s): %8.4f\n",
+                           i, colnames(ahies_1)[i], a_hat_norm[i]))
+
+# Projected means
+proj_ahies_1 <- as.numeric(t(a_hat) %*% res$x1)
+proj_ahies_2 <- as.numeric(t(a_hat) %*% res$x2)
+cat(sprintf("\nProjected mean (ahies_1): %.4f\n", proj_ahies_1))
+cat(sprintf("Projected mean (ahies_2)  : %.4f\n", proj_ahies_2))
+cat(sprintf("Projected difference     : %.4f\n", proj_ahies_1 - proj_ahies_2))
+
+largest <- which.max(abs(a_hat))
+cat(sprintf("\nLargest component: X%d (%s) → most responsible for rejection\n",
+            largest, colnames(ahies_1)[largest]))
+
+# (c) 95% SIMULTANEOUS CONFIDENCE INTERVALS
+
+cat("(c) 95% SIMULTANEOUS CIs FOR MEAN COMPONENT DIFFERENCES\n")
+cat(sprintf("√c² = %.4f\n\n", sqrt(res$crit)))
+
+ci_df <- data.frame(Component=character(), Estimate=numeric(),
+                    Lower=numeric(), Upper=numeric(),
+                    Sig=character(), stringsAsFactors=FALSE)
+
+var_names <- c("BMI","Edu_Expenses","Income")
+for(i in 1:p) {
+  est  <- res$d[i]
+  hw   <- sqrt(res$crit) * sqrt(res$Sp[i,i]*(1/n1+1/n2))
+  lo   <- est - hw;  hi <- est + hw
+  sig  <- ifelse(lo>0|hi<0, "YES ✓","no")
+  cat(sprintf("μ_ahies1_%d - μ_ahies2_%d  (%-10s): %7.4f ± %.4f → [%7.4f, %7.4f]  Sig: %s\n",
+              i,i,var_names[i],est,hw,lo,hi,sig))
+  ci_df <- rbind(ci_df,
+                 data.frame(Component=var_names[i],
+                            Estimate=est, Lower=lo, Upper=hi, Sig=sig))
+}
+
+
+# PLOTS
+library(ggplot2)
+library(patchwork)
+
+# Plot 1: Simultaneous CIs
+ci_df$color <- ifelse(ci_df$Sig=="YES ✓","#E76F51","#2A9D8F")
+
+p1 <- ggplot(ci_df, aes(y=Component, x=Estimate,
+                         xmin=Lower, xmax=Upper)) +
+  geom_vline(xintercept=0, linetype="dashed",
+             color="firebrick", linewidth=0.9) +
+  geom_errorbarh(aes(color=Sig), height=0.2, linewidth=1.3) +
+  geom_point(aes(color=Sig), size=5) +
+  geom_text(aes(label=sprintf("[%.3f, %.3f]",Lower,Upper)),
+            vjust=-1.5, size=3.5, color="grey30") +
+  scale_color_manual(values=c("YES ✓"="#E76F51","no"="#2A9D8F"),
+                     name="Significant") +
+  labs(title="95% Simultaneous CIs: ahies_1 − ahies_2",
+       subtitle="Red = significantly different from 0",
+       x="Difference in AHIES by semi-annual data", y=NULL) +
+  theme_minimal(base_size=12) +
+  theme(plot.title=element_text(face="bold"))
+
+# Plot 2: Mean comparison bar chart
+means_df <- data.frame(
+  Variable = rep(var_names, 2),
+  Group    = rep(c("ahies_1","ahies_2"), each=p),
+  Mean     = c(res$x1, res$x2)
+)
+
+p2 <- ggplot(means_df, aes(x=Variable, y=Mean, fill=Group)) +
+  geom_bar(stat="identity", position="dodge", alpha=0.85, width=0.6) +
+  scale_fill_manual(values=c("ahies_1"="#E76F51","ahies_2"="#2A9D8F")) +
+  labs(title="Mean Comparison of AHIES by semiannual Periods",
+       x=NULL, y="Some characteristics of AHIES ") +
+  theme_minimal(base_size=12) +
+  theme(plot.title=element_text(face="bold"))
+
+
+print(p1)
+print(p2)
+
+
+# One-Way MANOVA - Three Response Variables, Two Treatments
+
+# Data Entry 
+trt1 <- ahies_1
+trt2 <- ahies_2          
+
+# Combine with group labels
+data_all <- rbind(trt1, trt2)
+group    <- factor(c(rep(1, nrow(trt1)),
+                     rep(2, nrow(trt2))
+                     ))
+
+colnames(data_all) <- c("Y1", "Y2", "Y3")
+df <- data.frame(data_all, Treatment = group)
+
+#cat("Full Dataset:\n"); print(df)
+
+g <- 2                          # number of treatments
+n <- c(nrow(trt1), nrow(trt2))   # n1=1424, n2=1430
+N <- sum(n)                     # total observations = 2854
+p <- 3                          # number of response variables
+
+# (a) DECOMPOSITION: Mean + Treatment + Residual  
+# Overall mean
+x_grand <- colMeans(data_all)
+
+# Treatment means
+x_trt <- rbind(colMeans(trt1),
+               colMeans(trt2)
+               )
+rownames(x_trt) <- paste("Treatment", 1:g)
+colnames(x_trt) <- c("Y1", "Y2", "Y3")
+
+cat("\n── Overall Grand Mean \n")
+print(round(x_grand, 4))
+
+cat("\n── Treatment Means \n")
+print(round(x_trt, 4))
+
+# Build decomposition arrays observation by observation
+cat("\n── Decomposition: x_lj = x̄ + (x̄_l - x̄) + (x_lj - x̄_l) ──\n\n")
+
+treatments <- list(trt1, trt2)
+
+for (l in 1:g) {
+  for (j in 1:n[l]) {
+    obs <- treatments[[l]][j, ]
+    res <- obs - x_trt[l, ]
+  }
+}
+
+# (b) ONE-WAY MANOVA TABLE  [SS&CP Matrices]
+# Between-treatment SS&CP matrix B
+B <- matrix(0, p, p)                        
+for (l in 1:g) {
+  d <- matrix(x_trt[l,] - x_grand, ncol=1)
+  D <- as.numeric(d)
+  B <- B + n[l] * (D %*% t(D))
+}
+
+# Within-treatment (Residual/Error) SS&CP matrix W
+W <- matrix(0, p, p)                        
+for (l in 1:g) {
+  for (j in 1:n[l]) {
+    d <- matrix(treatments[[l]][j,] - x_trt[l,], ncol=1)
+    D <- as.numeric(d)
+    W <-(W + D %*% t(D))
+  }
+}
+
+# Total SS&CP matrix
+Total_SS <- B + W
+
+cat("── Between-Treatment SS&CP Matrix (B) ─\n")
+print(round(B, 4))
+
+cat("\n── Within-Treatment SS&CP Matrix (W) ─\n")
+print(round(W, 4))
+
+cat("\n── Total SS&CP Matrix (B + W) ─\n")
+print(round(Total_SS, 4))
+
+# Degrees of freedom
+df_trt   <- g - 1        # between:  g-1 = 1
+df_error <- N - g        # within:   N-g = 2852
+df_total <- N - 1        # total:    N-1 = 2853  
+
+cat("\n── MANOVA Table ─\n")
+cat(sprintf("%-20s  df = %d\n", "Treatment (Between):", df_trt))
+cat(sprintf("%-20s  df = %d\n", "Residual (Within):",   df_error))
+cat(sprintf("%-20s  df = %d\n", "Total:",               df_total))
+cat("\nB (Treatment SS&CP):\n");   print(round(B, 4))
+cat("\nW (Residual SS&CP):\n");    print(round(W, 4))
+
+# (c) WILKS' LAMBDA  
+Lambda_star <- det(W) / det(B + W)
+cat("\n── Wilks' Lambda ──\n")
+cat(sprintf("Λ* = |W| / |B+W| = %.6f / %.6f = %.6f\n",
+            det(W), det(B+W), Lambda_star))
+
+# Exact F-test for g=2, p=3   
+# When g=2: F = [(1-Λ*)/Λ*] * [(N-p-1)/p]
+alpha <- 0.05
+
+num_df   <- p                    # 3
+denom_df <- (N - p - 1)          # 2850
+
+# Exact: [(1 - Λ*) / Λ*] * [(N-p-1)/p]
+F_exact <- ((1 - Lambda_star) / Lambda_star) * ((N - p - 1) / p)
+F_crit  <- qf(alpha, df1 = num_df, df2 = denom_df, lower.tail = FALSE)
+p_exact <- pf(F_exact, df1 = num_df, df2 = denom_df, lower.tail = FALSE)
+
+cat(sprintf("\nExact F-test (g=2 transformation):\n"))
+cat(sprintf("  F-statistic = %.4f\n", F_exact))
+cat(sprintf("  df = (%d, %d)\n", num_df, denom_df))
+cat(sprintf("  Critical value F(0.05; %d, %d) = %.4f\n", num_df, denom_df, F_crit))
+cat(sprintf("  P-value = %.6f\n", p_exact))
+
+if (p_exact < alpha) {
+  cat(sprintf("\n  Decision: REJECT H0 at α = %.2f\n", alpha))
+  cat("  → Significant treatment effects exist.\n")
+} else {
+  cat(sprintf("\n  Decision: FAIL TO REJECT H0 at α = %.2f\n", alpha))
+}
+
+# ── Comparison Summary ─                             
+cat("\nSUMMARY COMPARISON\n")
+cat(sprintf("  Wilks' Lambda (Λ*)          : %.6f\n", Lambda_star))
+cat(sprintf("  Exact F-test p-value        : %.6f  → %s\n",
+            p_exact, ifelse(p_exact < alpha, "REJECT H0", "FAIL TO REJECT")))
+
